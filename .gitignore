@@ -1,0 +1,7 @@
+openabyss
+*.o
+build/
+AppDir/
+*.AppImage
+uwpic*
+SAVE[1-4]/

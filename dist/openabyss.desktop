@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=OpenAbyss
+Comment=A reimplementation of Ultima Underworld (needs your own copy of the game)
+Exec=openabyss
+Icon=openabyss
+Categories=Game;RolePlaying;
+Terminal=false
