@@ -41,6 +41,7 @@ typedef struct {
     int32_t dx, du, dv;
     int16_t last_y;         /* the y this edge is heading for */
     int     cursor;         /* the vertex it is heading for */
+    int     from;           /* the vertex it left (the perspective lookup's) */
     int     forward;        /* which way round the ring */
 } uw_edge;
 
@@ -70,6 +71,7 @@ static int seed_edge2(uw_edge *e, const uw_rast_svert *v, int n,
          * call did or not -- not at the reload's skip. */
         reload = 1;
 
+        e->from = e->cursor;
         e->cursor = e->forward ? (e->cursor + 1) % n
                                : (e->cursor + n - 1) % n;
         if (--*left == 0) return 0;
@@ -106,13 +108,81 @@ static int reseed_edge(uw_edge *e, const uw_rast_svert *v, int n,
     return seed_edge2(e, v, n, left, row, 0, 0);
 }
 
+/* ---- the perspective lookup (not the original's) ----------------------
+ *
+ * The edge walks above decide WHICH pixels a face covers, and that stays
+ * theirs. Only the texel a covered pixel takes is computed again, the
+ * correct way: 1/z, u/z and v/z are linear in screen space, so they are
+ * interpolated along the edge the walk is on at this row, then across the
+ * span, and u and v recovered by a divide per pixel. */
+typedef struct {
+    float x, q, s, t;       /* screen x, 1/z, u/z, v/z */
+} persp_pt;
+
+typedef struct {
+    float umin, umax, vmin, vmax;
+} persp_range;
+
+/* Every vertex in front of the eye, and the polygon's u and v bounds (a
+ * pixel never samples outside them). 0 sends the face to the original
+ * mapper. */
+static int persp_setup(const uw_rast_svert *v, int n, persp_range *r) {
+    int i;
+    if (n < 3) return 0;
+    r->umin = r->umax = (float)(uint16_t)v[0].u;
+    r->vmin = r->vmax = (float)(uint16_t)v[0].v;
+    for (i = 0; i < n; i++) {
+        float u = (float)(uint16_t)v[i].u, w = (float)(uint16_t)v[i].v;
+        if (v[i].z <= 0) return 0;
+        if (u < r->umin) r->umin = u;
+        if (u > r->umax) r->umax = u;
+        if (w < r->vmin) r->vmin = w;
+        if (w > r->vmax) r->vmax = w;
+    }
+    return 1;
+}
+
+/* Where the edge from `e->from` to `e->cursor` crosses `row`. */
+static persp_pt persp_edge(const uw_rast_svert *v, const uw_edge *e, int16_t row) {
+    const uw_rast_svert *a = &v[e->from], *b = &v[e->cursor];
+    float qa = 1.0f / (float)a->z, qb = 1.0f / (float)b->z, f = 0.0f;
+    float sa = (float)(uint16_t)a->u * qa, sb = (float)(uint16_t)b->u * qb;
+    float ta = (float)(uint16_t)a->v * qa, tb = (float)(uint16_t)b->v * qb;
+    persp_pt p;
+    if (a->sy != b->sy) f = (float)(a->sy - row) / (float)(a->sy - b->sy);
+    if (f < 0.0f) f = 0.0f;
+    if (f > 1.0f) f = 1.0f;
+    p.x = (float)a->sx + (float)(b->sx - a->sx) * f;
+    p.q = qa + (qb - qa) * f;
+    p.s = sa + (sb - sa) * f;
+    p.t = ta + (tb - ta) * f;
+    return p;
+}
+
+/* The texel offset for screen column `col` of the span from `l` to `r`. */
+static uint32_t persp_texel(const persp_pt *l, const persp_pt *r, int col,
+                            const persp_range *rg, const uw_rast_texrec *tex) {
+    float f = 0.0f, q, u, w;
+    if (r->x != l->x) f = ((float)col - l->x) / (r->x - l->x);
+    if (f < 0.0f) f = 0.0f;
+    if (f > 1.0f) f = 1.0f;
+    q = l->q + (r->q - l->q) * f;
+    u = (l->s + (r->s - l->s) * f) / q;
+    w = (l->t + (r->t - l->t) * f) / q;
+    if (u < rg->umin) u = rg->umin;
+    if (u > rg->umax) u = rg->umax;
+    if (w < rg->vmin) w = rg->vmin;
+    if (w > rg->vmax) w = rg->vmax;
+    return (uint32_t)((uint16_t)(long)w & tex->v_mask) + (uint32_t)((uint16_t)(long)u >> 8);
+}
+
 /* The walk, with the drawing optional. `fb` NULL walks without writing a
  * pixel; `stop_row` and `out` report the accumulators at the moment the walk
  * reaches that row, as the original holds them mid-polygon. */
 static int run(const uw_fb *fb, const uw_rast_svert *v,
                int n, const uw_rast_texrec *tex,
                const uint8_t *texels, size_t n_texels,
-               int stop_row, uw_gfx_edge_state *out) {
+               int stop_row, uw_gfx_edge_state *out, const persp_range *pr) {
     uw_edge left, right;
     int remaining = n + 1;      /* the edges left */
     int start = 0, i;
@@ -180,9 +250,12 @@ static int run(const uw_fb *fb, const uw_rast_svert *v,
             uint16_t u = (uint16_t)hi16(left.u);
             uint32_t vv = (uint32_t)left.v;
             uint16_t di = (uint16_t)(fb->row[row] + (uint16_t)lx);
+            persp_pt pl = {0}, pr_ = {0};
             int k;
+            if (pr) { pl = persp_edge(v, &left, row); pr_ = persp_edge(v, &right, row); }
             for (k = 0; k < count; k++) {
-                uint32_t off = (uint32_t)((uint16_t)(vv >> 16) & tex->v_mask)
+                uint32_t off = pr ? persp_texel(&pl, &pr_, lx + k, pr, tex)
+                             : (uint32_t)((uint16_t)(vv >> 16) & tex->v_mask)
                              + (uint32_t)(u >> 8);
                 if (di < fb->size && off < n_texels)
                     fb->pixels[di] = texels[off];
@@ -212,13 +285,22 @@ void uw_gfx_texture_poly_affine(const uw_fb *fb, const uw_rast_svert *v,
                                 int n, const uw_rast_texrec *tex,
                                 const uint8_t *texels, size_t n_texels) {
     if (!fb || !fb->pixels || !texels) return;
-    (void)run(fb, v, n, tex, texels, n_texels, INT16_MIN, NULL);
+    (void)run(fb, v, n, tex, texels, n_texels, INT16_MIN, NULL, NULL);
+}
+
+void uw_gfx_texture_poly_affine_persp(const uw_fb *fb, const uw_rast_svert *v,
+                                      int n, const uw_rast_texrec *tex,
+                                      const uint8_t *texels, size_t n_texels) {
+    persp_range r;
+    if (!fb || !fb->pixels || !texels) return;
+    (void)run(fb, v, n, tex, texels, n_texels, INT16_MIN, NULL,
+              persp_setup(v, n, &r) ? &r : NULL);
 }
 
 int uw_gfx_affine_walk_to(const uw_rast_svert *v, int n, int stop_row,
                           uw_gfx_edge_state *out) {
     uw_rast_texrec t = {0, 0, 0, 0};
-    return run(NULL, v, n, &t, NULL, 0, stop_row, out);
+    return run(NULL, v, n, &t, NULL, 0, stop_row, out, NULL);
 }
 
 /* ---- gfx_texture_poly_wall --------------------------------- */
@@ -392,22 +474,28 @@ int uw_gfx_wall_ucol(const uw_rast_svert *v, int n, const uw_rast_proj *proj,
     }
 }
 
-void uw_gfx_texture_poly_wall(const uw_fb *fb, const uw_rast_svert *v, int n,
-                              const uw_rast_texrec *tex,
-                              const uint8_t *texels, size_t n_texels,
-                              const uw_rast_proj *proj,
-                              uint8_t *ucol, int n_ucol, int32_t *span_dv) {
+/* The wall mapper's walk; `pr` non-NULL takes each pixel's texel from the
+ * perspective lookup instead of the column table and the span's v, and
+ * leaves the table and the carried v step alone. */
+static void wall_run(const uw_fb *fb, const uw_rast_svert *v, int n,
+                     const uw_rast_texrec *tex,
+                     const uint8_t *texels, size_t n_texels,
+                     const uw_rast_proj *proj,
+                     uint8_t *ucol, int n_ucol, int32_t *span_dv,
+                     const persp_range *pr) {
     uw_edge left, right;
     uw_gfx_wall_setup setup;
     int remaining = n + 1;
     int start = 0, i;
     int16_t row;
-    uint16_t bp;
+    uint16_t bp = 0;
     int32_t dv = span_dv ? *span_dv : 0;
 
-    if (n < 3 || !fb || !fb->pixels || !texels || !ucol) return;
-    if (uw_gfx_wall_ucol(v, n, proj, ucol, n_ucol, &setup) < 0) return;
-    bp = setup.bp;
+    if (n < 3 || !fb || !fb->pixels || !texels) return;
+    if (!pr) {
+        if (!ucol || uw_gfx_wall_ucol(v, n, proj, ucol, n_ucol, &setup) < 0) return;
+        bp = setup.bp;
+    }
 
     for (i = 1; i < n; i++)
         if (v[i].sy > v[start].sy) start = i;
@@ -445,10 +533,16 @@ void uw_gfx_texture_poly_wall(const uw_fb *fb, const uw_rast_svert *v, int n,
             uint32_t vv = ((uint32_t)bp << 16) | (uint16_t)left.v;
             int draw = row >= 0 && row < fb->n_rows;
             uint16_t di = draw ? (uint16_t)(fb->row[row] + (uint16_t)lx) : 0;
+            persp_pt pl = {0}, pr_ = {0};
             int k;
+            if (pr) { pl = persp_edge(v, &left, row); pr_ = persp_edge(v, &right, row); }
             for (k = 0; k < count; k++) {
                 int col = lx + k;
-                if (draw && col >= 0 && col < n_ucol) {
+                if (draw && pr) {
+                    uint32_t off = persp_texel(&pl, &pr_, col, pr, tex);
+                    if (di < fb->size && off < n_texels)
+                        fb->pixels[di] = texels[off];
+                } else if (draw && col >= 0 && col < n_ucol) {
                     uint32_t off = (uint32_t)((uint16_t)(vv >> 16) & tex->v_mask)
                                  + (uint32_t)ucol[col];
                     if (di < fb->size && off < n_texels)
@@ -473,5 +567,23 @@ void uw_gfx_texture_poly_wall(const uw_fb *fb, const uw_rast_svert *v, int n,
         if (row <= right.last_y)
             if (!reseed_edge(&right, v, n, &remaining, row)) break;
     }
-    if (span_dv) *span_dv = dv;
+    if (span_dv && !pr) *span_dv = dv;
+}
+
+void uw_gfx_texture_poly_wall(const uw_fb *fb, const uw_rast_svert *v, int n,
+                              const uw_rast_texrec *tex,
+                              const uint8_t *texels, size_t n_texels,
+                              const uw_rast_proj *proj,
+                              uint8_t *ucol, int n_ucol, int32_t *span_dv) {
+    wall_run(fb, v, n, tex, texels, n_texels, proj, ucol, n_ucol, span_dv, NULL);
+}
+
+void uw_gfx_texture_poly_wall_persp(const uw_fb *fb, const uw_rast_svert *v, int n,
+                                    const uw_rast_texrec *tex,
+                                    const uint8_t *texels, size_t n_texels,
+                                    const uw_rast_proj *proj,
+                                    uint8_t *ucol, int n_ucol, int32_t *span_dv) {
+    persp_range r;
+    wall_run(fb, v, n, tex, texels, n_texels, proj, ucol, n_ucol, span_dv,
+             persp_setup(v, n, &r) ? &r : NULL);
 }

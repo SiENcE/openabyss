@@ -171,4 +171,26 @@ typedef struct {
 int uw_gfx_wall_ucol(const uw_rast_svert *v, int n, const uw_rast_proj *proj,
                      uint8_t *ucol, int n_ucol, uw_gfx_wall_setup *out);
 
+/* ---- perspective-correct texturing: the port's, NOT the original's ----
+ *
+ * The two mappers above are what the game did, and what the port draws by
+ * default -- the affine one is why a floor seen at a slant swims. These
+ * are the same two with one thing changed: the TEXEL each pixel takes.
+ * Which pixels a face covers is still the original walk's, rounding and
+ * quirks included, so faces meet where they always met and nothing about
+ * the frame's shape moves; only the texture inside a face is placed
+ * correctly -- 1/z, u/z and v/z interpolated along the walk's edges and
+ * across each span, and divided out per pixel. A face with a vertex at
+ * z <= 0 (never after the clip, but cheap to refuse) takes the original's
+ * texel, and the wall form leaves the column table and the carried span
+ * step (`ucol`, `span_dv`) as they were. */
+void uw_gfx_texture_poly_affine_persp(const uw_fb *fb, const uw_rast_svert *v,
+                                      int n, const uw_rast_texrec *tex,
+                                      const uint8_t *texels, size_t n_texels);
+void uw_gfx_texture_poly_wall_persp(const uw_fb *fb, const uw_rast_svert *v, int n,
+                                    const uw_rast_texrec *tex,
+                                    const uint8_t *texels, size_t n_texels,
+                                    const uw_rast_proj *proj,
+                                    uint8_t *ucol, int n_ucol, int32_t *span_dv);
+
 #endif

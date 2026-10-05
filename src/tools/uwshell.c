@@ -96,6 +96,7 @@ static uint16_t gr_sizes(const char *dir, const char *const *files, int nfiles, 
 
 uw_scene *sc;
 static int sc_opened;
+static int present_perspective;    /* --perspective: the port's texels, not the original's (uw_texmap.h) */
 /* A place this build looks for the game's files before the player's own
  * configuration (-DUW_GAME_DIR_FALLBACK=\"DIR\"); "." when it names none. */
 #ifndef UW_GAME_DIR_FALLBACK
@@ -278,6 +279,7 @@ static int scene_at(uw_motion *m) {
     if (!sc) {
         sc = calloc(1, sizeof *sc);
         sc_opened = sc && uw_scene_open(sc, game_dir);
+        if (sc_opened) sc->perspective = present_perspective;
     }
     return sc_opened && uw_scene_level(sc, (int16_t)(ds[0x7278] | ds[0x7279] << 8) - 1, m->lseg + 4, 0x7c08);
 }
@@ -578,7 +580,8 @@ static int usage(void) {
             strcmp(UW_GAME_DIR_FALLBACK, ".") ? ", else " : "", strcmp(UW_GAME_DIR_FALLBACK, ".") ? UW_GAME_DIR_FALLBACK : "");
     fprintf(stderr,
                     "The window: --scale N, --fullscreen (Alt-Enter toggles), --square for square pixels (4:3 is the\n"
-                    "default, as a VGA monitor showed 320x200), --no-vsync, --pace MS for a pass's least length (8).\n");
+                    "default, as a VGA monitor showed 320x200), --no-vsync, --pace MS for a pass's least length (8).\n"
+                    "--perspective draws the dungeon's textures perspective-correct, where the original's swim.\n");
     return 2;
 }
 
@@ -716,7 +719,7 @@ static void palette_fade_run(uw_motion *m, uint8_t *live, const uint8_t *target,
  * the palette faded out two steps, the page redrawn (the library's
  * uw_boot_draw_main_screen), palette_read(0) and the ramp back in. With
  * `enter` it is game_change_mode(1)'s enter handler, event_handlers[0][0],
- * and makes the bindings too: viewport_unbind_hotspots and the view's
+ * and makes the bindings too: dungeon_mode_teardown and the view's
  * (uw_motion_dungeon_viewport) before the fade, dungeon_mode_enter on the
  * new page (uw_motion_dungeon_enter). Either way the cursor is hidden first
  * and shown at the end, as the original's cursor_hide and cursor_show
@@ -1740,7 +1743,7 @@ static void cutscene_pass(uw_shell *sh) {
  * the font back, load_textures_and_doors when in game -- the scene keeps
  * its textures, so nothing to reload -- and the return: full screen from
  * the dungeon is game_change_mode(1), the dungeon's leave and enter
- * handlers (dungeon_leave_handler and dungeon_draw_main_screen) over
+ * handlers (dungeon_refresh_composite and dungeon_draw_main_screen) over
  * the page the interpreter cleared; from the menu nothing; from another
  * mode palette_load(0) and every event posted; in the view, the view
  * refreshed. */
@@ -1926,10 +1929,6 @@ static void dungeon_from_menu(uw_shell *sh) {
         /* game_return_to_menu's tail: the mode index back, the mode, the
          * ENTER handler -- dungeon_mode_enter */
         uw_motion_enter_game(&sh->m, sh->m.clock);
-        /* and what the left game's calls still owed, now that
-         * game_return_to_menu returns into them: options_click_row's
-         * cursor_show, when the death came inside a restore */
-        for (; sh->options.show_owed > 0; sh->options.show_owed--) uw_motion_cursor_show(&sh->m);
     } else {
         ww(ds, 0x565e, 1);
         ww(ds, 0x5664, 0);
@@ -2095,26 +2094,19 @@ static void menu_pass(uw_shell *sh) {
  * screen and loads palette 0; play_title_cutscene drains the keys held from
  * the prompt and plays cutscene 9; then main_menu(1), whose first act is
  * cutscene 0 when no save exists. Nothing waits: each screen stands for as
- * long as the loads after it take (game_init has no delay). A machine of
- * fixed speed with a fast disk shows PRES1 from 0.07 s to 0.17, black to
- * 0.21 (show_fullscreen_image's blank while pres2.byt loads), PRES2 to
- * 0.33, then black -- the rest of game_init and play_title_cutscene's open
- * -- until the title's fade begins at 1.25 s. A scripted run keeps that
- * timeline; played, each screen is held SPLASH_HOLD longer, about as long
- * as the loads behind it took on a hard disk of the day. */
+ * long as the loads after it take (game_init has no delay), so the port
+ * holds them as long as the original does on a machine of fixed speed:
+ * PRES1 from 0.07 s to 0.17, black to 0.21
+ * (show_fullscreen_image's blank while pres2.byt loads), PRES2 to 0.33,
+ * then black -- the rest of game_init and play_title_cutscene's open --
+ * until the title's fade begins at 1.25 s. */
 enum {                                 /* from the program's start, in ticks */
     PRES1_AT = 18,                     /* 0.07 s: after gfx_init's mode set */
     PRES_BLANK_AT = 44,                /* 0.17 s */
     PRES2_AT = 54,                     /* 0.21 s */
     PRES_END_AT = 85,                  /* 0.33 s */
-    TITLE_AT = 320,                    /* 1.25 s */
-    SPLASH_HOLD = 512                  /* 2 s more on each screen, played */
+    TITLE_AT = 320                     /* 1.25 s */
 };
-
-/* when step `at` comes: past each screen already shown, its hold */
-static uint32_t title_at(const uw_shell *sh, uint32_t at, int screens_shown) {
-    return sh->script ? at : at + (uint32_t)screens_shown * SPLASH_HOLD;
-}
 
 static void title_screen(uw_shell *sh, const char *file, int palette) {
     char path[600];
@@ -2145,23 +2137,23 @@ static void title_pass(uw_shell *sh) {
         sh->title_step = 1;
         break;
     case 1:
-        if (m->clock - sh->clock0 < title_at(sh, PRES_BLANK_AT, 1)) break;
+        if (m->clock - sh->clock0 < PRES_BLANK_AT) break;
         memset(sh->screen, 0, 64000);                       /* show_fullscreen_image's blank */
         sh->title_step = 2;
         break;
     case 2:
-        if (m->clock - sh->clock0 < title_at(sh, PRES2_AT, 1)) break;
+        if (m->clock - sh->clock0 < PRES2_AT) break;
         title_screen(sh, "PRES2.BYT", 6);
         sh->title_step = 3;
         break;
     case 3:
-        if (m->clock - sh->clock0 < title_at(sh, PRES_END_AT, 2)) break;
+        if (m->clock - sh->clock0 < PRES_END_AT) break;
         memset(sh->screen, 0, 64000);                       /* screen_clear */
         title_screen(sh, "", 0);                            /* palette_load(0) */
         sh->title_step = 4;
         break;
     case 4:
-        if (m->clock - sh->clock0 < title_at(sh, TITLE_AT, 2)) break;
+        if (m->clock - sh->clock0 < TITLE_AT) break;
         uw_motion_cutscene_request(m, 9);                   /* play_title_cutscene */
         sh->title_step = 5;
         break;
@@ -2187,7 +2179,7 @@ static void title_pass(uw_shell *sh) {
 
 /* ---- the table ---- */
 
-/* event_handlers[0][15], dungeon_leave_handler: game_change_mode's on
+/* event_handlers[0][15], dungeon_refresh_composite: game_change_mode's on
  * the way to the automap or a conversation (src/uw_motion_save.c). */
 static void dungeon_leave(uw_shell *sh) { uw_motion_dungeon_leave(&sh->m); }
 
@@ -2627,6 +2619,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--sound")) sh->sound = 1;
         else if (!strcmp(argv[i], "--nosound")) sh->sound = -1;
         else if (!strcmp(argv[i], "--square")) present_aspect = 0;
+        else if (!strcmp(argv[i], "--perspective")) present_perspective = 1;
         else if (!strcmp(argv[i], "--locate")) locate = 1;
         else if (!strcmp(argv[i], "--fullscreen")) sh->fullscreen = 1;
         else if (!strcmp(argv[i], "--no-vsync")) sh->vsync = -1;
@@ -2668,6 +2661,7 @@ int main(int argc, char **argv) {
         sc = calloc(1, sizeof *sc);
         sh->boot = calloc(1, sizeof *sh->boot);
         sc_opened = sc && uw_scene_open(sc, game_dir);
+        if (sc_opened) sc->perspective = present_perspective;
         /* new_game in its two halves, with the character
          * generation between them: the screen when it was asked for
          * (src/uw_chargen_ui.c, run over the passes below), else the

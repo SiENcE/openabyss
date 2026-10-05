@@ -555,6 +555,7 @@ static long scene_render(uw_scene *s, const uw_fb *fb, int pick) {
     /* gfx_select_row_blitter: 1 from view_build_draw_list, 2 from
      * drawlist_begin_frame */
     s->dl.row_blitter = (uint8_t)(pick ? 2 : 1);
+    s->dl.perspective = s->perspective;    /* the host's; dl_first clears the executor */
     for (pass = s->drawn == 0 ? 0 : 1; pass < 2; pass++) {
         dl_frame_words(s);
         s->dl.n_faces = 0;

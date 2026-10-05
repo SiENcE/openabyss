@@ -54,7 +54,7 @@ static int same_ignoring_case(const char *a, const char *b) {
 
 int uw_path_resolve(const char *path, char *out, size_t cap) {
     if (strlen(path) + 1 > cap) return 0;
-    strcpy(out, path);
+    if (out != path) strcpy(out, path);
     return exists(path);
 }
 

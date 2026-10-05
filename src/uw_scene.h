@@ -95,6 +95,8 @@ typedef struct {
     int      shade_blank;                  /* shade_reload_or_blank(1): the ramp's first two
                                             * bytes a row zeroed until it is read again */
     long     unsupported;                  /* what a stage reported not carrying */
+    int      perspective;                  /* the host's: textures perspective-correct, which
+                                            * the original's were not (uw_texmap.h) */
 } uw_scene;
 
 /* Load UW.EXE's data segments and the level-independent files: object

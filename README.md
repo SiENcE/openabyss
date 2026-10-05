@@ -26,7 +26,8 @@ cmake --build build                # builds build/openabyss
 ```
 
 On Linux with SDL 3 installed (and `pkg-config`), `make` builds `./openabyss`
-as well. SDL 3.4 or later writes screenshots as PNG; 3.2 writes them as BMP.
+as well. For Windows, it can be cross-compiled with MinGW-w64 on Linux or in
+WSL: `cmake/mingw-w64-x86_64.cmake` says how. SDL 3.4 or later writes screenshots as PNG; 3.2 writes them as BMP.
 
 ## Finding the game
 
@@ -82,9 +83,46 @@ saved game that had it switched off.
 **The window** shows the 320 x 200 picture at 4:3, as a VGA monitor did
 (`--square` for square pixels), resizable; `--scale N` sets its first size,
 `--fullscreen` or Alt-Enter full screen, `--no-vsync` and `--pace MS` the
-timing. The game's own keys are the original's: the letters walk and turn,
-the keypad glides the cursor, F1..F10 and the Ctrl keys open panels, Alt-q
-writes a screenshot (`uwpicNNN.png` in the working directory), Alt-x quits.
+timing.
+
+**The keys** are the original's. In the dungeon, the movement keys act for
+as long as they are held:
+
+| Key | |
+|---|---|
+| `w` / `s` / `x` | run forward / walk forward / walk back |
+| `a` / `d` | turn left / right |
+| `z` / `c` | slide left / right |
+| Shift with `w` `s` `x` `a` `d` | one step or turn at a time |
+| `j` / Shift-`j` | jump / standing jump |
+| `e` / `q` | rise / sink, while levitating or flying |
+| `1` / `2` / `3` | look down / straight ahead again / look up |
+| `p` / `;` / `.` | attack: bash / slash / thrust |
+| F1 .. F6 | the action icons: options, talk, get, look, fight, use |
+| F7 | the character's statistics |
+| F8 | cast the spell on the rune shelf |
+| F9 | use the Track skill |
+| F10 | sleep |
+| Ctrl-s / Ctrl-r | save / restore a game |
+| Ctrl-m / Ctrl-f / Ctrl-d | music / sound / detail options |
+| Ctrl-q | quit, asking first |
+| keypad 1..9 | glide the cursor toward that edge or corner |
+| Tab / Shift-Tab | jump the cursor between the screen's three parts |
+| `1` .. `4` | in a conversation, the answer to give |
+| Alt-q | screenshot, `uwpicNNN.png` in the working directory |
+| Alt-x | quit at once |
+| Alt-F7 / Alt-F8 | the game's version / the level and position |
+
+**The mouse** plays as the original's: the left button held in the view
+walks -- turning toward the side the cursor is on, forward the higher it
+is, and in the view's bottom strip sliding left, back or right by thirds --
+and both buttons together jump. Clicks act through the action icons and
+the panels.
+
+**The textures** are drawn as the original drew them, which is why a floor
+or a wall seen at a slant swims as you move. `--perspective` draws them
+perspective-correct instead: the same faces covering the same pixels, with
+the texture inside each one placed where it belongs.
 
 **Saves** go where the original keeps them, `SAVE1`..`SAVE4` beside the
 game's files, when that directory is writable, and otherwise to SDL's

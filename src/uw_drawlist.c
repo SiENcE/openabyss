@@ -129,6 +129,12 @@ static void draw_face(uw_dl *m, const uw_fb *fb, const uw_rast_svert *sv,
     if (m->no_mapper) {
         /* nothing: a harness asking which pixels the lighting pass alone
          * reaches */
+    } else if (m->perspective) {
+        if (shader == 0x545)
+            uw_gfx_texture_poly_wall_persp(fb, sv, n, r, px, plen, &m->proj,
+                                           m->ucol, (int)sizeof m->ucol, &m->wall_dv);
+        else
+            uw_gfx_texture_poly_affine_persp(fb, sv, n, r, px, plen);
     } else if (shader == 0x545)
         uw_gfx_texture_poly_wall(fb, sv, n, r, px, plen, &m->proj,
                                  m->ucol, (int)sizeof m->ucol, &m->wall_dv);
